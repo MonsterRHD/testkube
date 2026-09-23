@@ -28,3 +28,21 @@ func TestStopActor_Sentence(t *testing.T) {
 		})
 	}
 }
+
+func TestStopActor_IsPerson(t *testing.T) {
+	tests := []struct {
+		name  string
+		actor StopActor
+		want  bool
+	}{
+		{name: "user", actor: StopActorUser, want: true},
+		{name: "api", actor: StopActorAPI, want: true},
+		{name: "control plane", actor: StopActorControlPlane, want: false},
+		{name: "no actor", actor: "", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.actor.IsPerson())
+		})
+	}
+}
