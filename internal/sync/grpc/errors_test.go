@@ -8,6 +8,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	executorv1 "github.com/kubeshop/testkube/api/executor/v1"
 	testworkflowsv1 "github.com/kubeshop/testkube/api/testworkflows/v1"
 	syncagent "github.com/kubeshop/testkube/internal/sync"
 )
@@ -60,5 +61,22 @@ func TestOtherStatusCodesAreNotConflicts(t *testing.T) {
 				t.Errorf("%s must not be treated as an ownership conflict, got %v", code, err)
 			}
 		})
+	}
+}
+
+// The Control Plane rejects a resource that it cannot store with InvalidArgument. The same resource
+// is rejected on every retry, so callers need the sentinel to stop the requeue loop.
+func TestInvalidResourceIsRecognised(t *testing.T) {
+	const rejection = `Webhook "hook": invalid status details type "execution-fail"`
+	srv := testSrv{Err: status.Error(codes.InvalidArgument, rejection)}
+	client := startGRPCTestConnection(t, &srv)
+
+	err := client.UpdateOrCreateWebhook(t.Context(), executorv1.Webhook{})
+
+	if !errors.Is(err, syncagent.ErrInvalidResource) {
+		t.Errorf("expected an invalid resource, got %v", err)
+	}
+	if !strings.Contains(err.Error(), rejection) {
+		t.Errorf("expected the Control Plane's message to be preserved, got %v", err)
 	}
 }
