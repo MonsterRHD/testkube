@@ -22,6 +22,12 @@ spec:
   - {{ . }}
   {{- end }}
   {{- end }}
+  {{- if ne (len .StatusDetailsTypes) 0 }}
+  statusDetailsTypes:
+  {{- range .StatusDetailsTypes }}
+  - {{ . }}
+  {{- end }}
+  {{- end }}
   {{- if .Uri }}
   uri: {{ .Uri }}
   {{- end }}

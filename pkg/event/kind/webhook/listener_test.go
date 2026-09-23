@@ -300,3 +300,81 @@ func exampleFinishedExecution(status testkube.TestWorkflowStatus) *testkube.Test
 	}
 	return execution
 }
+
+func TestWebhookListener_Match(t *testing.T) {
+	events := []testkube.EventType{*testkube.EventStartTestWorkflow, *testkube.EventEndTestWorkflowFailed}
+	withStatusDetails := func(statusDetailsType testkube.StatusDetailsType) *testkube.TestWorkflowExecution {
+		execution := exampleFinishedExecution(testkube.FAILED_TestWorkflowStatus)
+		execution.Result.StatusDetails = &testkube.TestWorkflowStatusDetails{Type_: string(statusDetailsType), Reason: "reason"}
+		return execution
+	}
+
+	tests := []struct {
+		name               string
+		statusDetailsTypes []string
+		event              testkube.Event
+		want               bool
+	}{
+		{
+			name:  "no condition matches an end event",
+			event: testkube.NewEventEndTestWorkflowFailed(withStatusDetails(testkube.StatusDetailsTypeStepFailure), ""),
+			want:  true,
+		},
+		{
+			name:  "no condition matches a start event",
+			event: testkube.NewEventStartTestWorkflow(exampleExecution(), ""),
+			want:  true,
+		},
+		{
+			name:               "condition matches an end event with a listed type",
+			statusDetailsTypes: []string{string(testkube.StatusDetailsTypeExecutionFailure)},
+			event:              testkube.NewEventEndTestWorkflowFailed(withStatusDetails(testkube.StatusDetailsTypeExecutionFailure), ""),
+			want:               true,
+		},
+		{
+			name:               "condition rejects an end event with a type that is not listed",
+			statusDetailsTypes: []string{string(testkube.StatusDetailsTypeExecutionFailure)},
+			event:              testkube.NewEventEndTestWorkflowFailed(withStatusDetails(testkube.StatusDetailsTypeStepFailure), ""),
+			want:               false,
+		},
+		{
+			name:               "condition rejects an end event without status details",
+			statusDetailsTypes: []string{string(testkube.StatusDetailsTypeExecutionFailure)},
+			event:              testkube.NewEventEndTestWorkflowFailed(exampleFinishedExecution(testkube.FAILED_TestWorkflowStatus), ""),
+			want:               false,
+		},
+		{
+			name:               "condition rejects an end event without a result",
+			statusDetailsTypes: []string{string(testkube.StatusDetailsTypeExecutionFailure)},
+			event:              testkube.NewEventEndTestWorkflowFailed(exampleExecution(), ""),
+			want:               false,
+		},
+		{
+			name:               "an empty value in the condition rejects an end event without status details",
+			statusDetailsTypes: []string{""},
+			event:              testkube.NewEventEndTestWorkflowFailed(exampleFinishedExecution(testkube.FAILED_TestWorkflowStatus), ""),
+			want:               false,
+		},
+		{
+			name:               "condition rejects a start event",
+			statusDetailsTypes: []string{string(testkube.StatusDetailsTypeExecutionFailure)},
+			event:              testkube.NewEventStartTestWorkflow(exampleExecution(), ""),
+			want:               false,
+		},
+		{
+			name:               "condition rejects an event without an execution",
+			statusDetailsTypes: []string{string(testkube.StatusDetailsTypeExecutionFailure)},
+			event:              testkube.Event{Type_: testkube.EventEndTestWorkflowFailed},
+			want:               false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			l := NewWebhookListener("l1", "http://localhost", "", events, "", "", nil, false, nil, nil,
+				ListenerWithStatusDetailsTypes(tt.statusDetailsTypes))
+
+			assert.Equal(t, tt.want, l.Match(tt.event))
+		})
+	}
+}

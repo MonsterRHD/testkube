@@ -34,6 +34,9 @@ type WebhookSpec struct {
 	Uri string `json:"uri,omitempty"`
 	// Events declare list if events on which webhook should be called
 	Events []EventType `json:"events,omitempty"`
+	// StatusDetailsTypes limits the webhook to events whose test workflow execution carries a status details object with a type in the list. Empty means no condition.
+	// +kubebuilder:validation:items:Enum=init-failure;execution-failure;step-failure;user-cancel;unknown
+	StatusDetailsTypes []string `json:"statusDetailsTypes,omitempty"`
 	// Labels to filter for tests and test suites
 	Selector string `json:"selector,omitempty"`
 	// will load the generated payload for notification inside the object
@@ -68,6 +71,9 @@ type WebhookTemplateSpec struct {
 	Uri string `json:"uri,omitempty"`
 	// Events declare list if events on which webhook should be called
 	Events []EventType `json:"events,omitempty"`
+	// StatusDetailsTypes limits the webhook to events whose test workflow execution carries a status details object with a type in the list. Empty means no condition.
+	// +kubebuilder:validation:items:Enum=init-failure;execution-failure;step-failure;user-cancel;unknown
+	StatusDetailsTypes []string `json:"statusDetailsTypes,omitempty"`
 	// Labels to filter for tests and test suites
 	Selector string `json:"selector,omitempty"`
 	// will load the generated payload for notification inside the object

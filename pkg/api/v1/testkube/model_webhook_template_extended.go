@@ -18,13 +18,14 @@ import (
 type WebhookTemplates []WebhookTemplate
 
 func (list WebhookTemplates) Table() (header []string, output [][]string) {
-	header = []string{"Name", "URI", "Events", "Selector", "Labels", "Disabled"}
+	header = []string{"Name", "URI", "Events", "Status details types", "Selector", "Labels", "Disabled"}
 
 	for _, e := range list {
 		output = append(output, []string{
 			e.Name,
 			e.Uri,
 			fmt.Sprintf("%v", e.Events),
+			fmt.Sprintf("%v", e.StatusDetailsTypes),
 			e.Selector,
 			MapToString(e.Labels),
 			fmt.Sprint(e.Disabled),

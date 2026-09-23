@@ -30,6 +30,7 @@ func MapCRDToAPI(item executorv1.Webhook) testkube.Webhook {
 		Updated:                  updateTime,
 		Uri:                      item.Spec.Uri,
 		Events:                   MapEventArrayToCRDEvents(item.Spec.Events),
+		StatusDetailsTypes:       item.Spec.StatusDetailsTypes,
 		Selector:                 item.Spec.Selector,
 		PayloadObjectField:       item.Spec.PayloadObjectField,
 		PayloadTemplate:          item.Spec.PayloadTemplate,
@@ -114,6 +115,7 @@ func MapAPIToCRD(webhook testkube.Webhook) executorv1.Webhook {
 		Spec: executorv1.WebhookSpec{
 			Uri:                      webhook.Uri,
 			Events:                   MapEventTypesToStringArray(webhook.Events),
+			StatusDetailsTypes:       webhook.StatusDetailsTypes,
 			Selector:                 webhook.Selector,
 			PayloadObjectField:       webhook.PayloadObjectField,
 			PayloadTemplate:          webhook.PayloadTemplate,
@@ -139,6 +141,7 @@ func MapAPICreateRequestToCRD(webhook testkube.WebhookCreateRequest) executorv1.
 		Spec: executorv1.WebhookSpec{
 			Uri:                      webhook.Uri,
 			Events:                   MapEventTypesToStringArray(webhook.Events),
+			StatusDetailsTypes:       webhook.StatusDetailsTypes,
 			Selector:                 webhook.Selector,
 			PayloadObjectField:       webhook.PayloadObjectField,
 			PayloadTemplate:          webhook.PayloadTemplate,
@@ -251,6 +254,10 @@ func MapUpdateToSpec(request testkube.WebhookUpdateRequest, webhook *executorv1.
 		webhook.Spec.Events = MapEventTypesToStringArray(*request.Events)
 	}
 
+	if request.StatusDetailsTypes != nil {
+		webhook.Spec.StatusDetailsTypes = *request.StatusDetailsTypes
+	}
+
 	if request.Labels != nil {
 		webhook.Labels = *request.Labels
 	}
@@ -328,6 +335,7 @@ func MapSpecToUpdate(webhook *executorv1.Webhook) (request testkube.WebhookUpdat
 
 	events := MapEventArrayToCRDEvents(webhook.Spec.Events)
 	request.Events = &events
+	request.StatusDetailsTypes = &webhook.Spec.StatusDetailsTypes
 
 	request.Labels = &webhook.Labels
 	request.Annotations = &webhook.Annotations

@@ -7863,6 +7863,23 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/EventType"
+        statusDetailsTypes:
+          type: array
+          description: |
+            Status details types that the webhook fires for. Empty means no condition.
+            When set, the webhook fires only for an event whose test workflow execution carries a statusDetails object with a type in the list.
+            An event without the object, for example a start event, does not fire.
+          items:
+            type: string
+            enum:
+              - init-failure
+              - execution-failure
+              - step-failure
+              - user-cancel
+              - unknown
+          example:
+            - execution-failure
+            - step-failure
         selector:
           type: string
           description: Labels to filter for tests and test suites
@@ -7914,6 +7931,23 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/EventType"
+        statusDetailsTypes:
+          type: array
+          description: |
+            Status details types that the webhook fires for. Empty means no condition.
+            When set, the webhook fires only for an event whose test workflow execution carries a statusDetails object with a type in the list.
+            An event without the object, for example a start event, does not fire.
+          items:
+            type: string
+            enum:
+              - init-failure
+              - execution-failure
+              - step-failure
+              - user-cancel
+              - unknown
+          example:
+            - execution-failure
+            - step-failure
         selector:
           type: string
           description: Labels to filter for tests and test suites

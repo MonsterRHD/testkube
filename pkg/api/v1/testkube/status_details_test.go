@@ -136,3 +136,40 @@ func TestNewStatusDetails(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateStatusDetailsTypes(t *testing.T) {
+	tests := []struct {
+		name    string
+		types   []string
+		wantErr string
+	}{
+		{name: "no types", types: nil},
+		{name: "every type", types: []string{"init-failure", "execution-failure", "step-failure", "user-cancel", "unknown"}},
+		{
+			name:    "misspelled type",
+			types:   []string{"step-failure", "step-failed"},
+			wantErr: `invalid status details type "step-failed", allowed values: init-failure, execution-failure, step-failure, user-cancel, unknown`,
+		},
+		{name: "empty value", types: []string{""}, wantErr: `invalid status details type ""`},
+		{name: "case differs", types: []string{"Step-Failure"}, wantErr: `invalid status details type "Step-Failure"`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateStatusDetailsTypes(tt.types)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			assert.ErrorContains(t, err, tt.wantErr)
+		})
+	}
+}
+
+func TestStatusDetailsTypes(t *testing.T) {
+	types := StatusDetailsTypes()
+	assert.Equal(t, []string{"init-failure", "execution-failure", "step-failure", "user-cancel", "unknown"}, types)
+
+	types[0] = "changed"
+	assert.Equal(t, string(StatusDetailsTypeInitFailure), StatusDetailsTypes()[0], "a caller must not change the list that the validation reads")
+}

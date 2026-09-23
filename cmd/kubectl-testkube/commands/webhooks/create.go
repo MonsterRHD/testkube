@@ -16,6 +16,7 @@ import (
 func NewCreateWebhookCmd() *cobra.Command {
 	var (
 		events                   []string
+		statusDetailsTypes       []string
 		name, uri                string
 		selector                 string
 		labels                   map[string]string
@@ -95,6 +96,7 @@ func NewCreateWebhookCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&name, "name", "n", "", "unique webhook name - mandatory")
 	cmd.Flags().MarkShorthandDeprecated("name", "please use --name instead")
 	cmd.Flags().StringArrayVarP(&events, "events", "e", []string{}, "event types handled by webhook e.g. start-test|end-test")
+	cmd.Flags().StringArrayVar(&statusDetailsTypes, "status-details-type", []string{}, "status details types that the webhook fires for, repeatable, e.g. init-failure|execution-failure|step-failure|user-cancel|unknown")
 	cmd.Flags().StringVarP(&uri, "uri", "u", "", "URI which should be called when given event occurs (golang template supported)")
 	cmd.Flags().StringVarP(&selector, "selector", "", "", "expression to select tests, test suites, test workflows for webhook events: --selector app=backend")
 	cmd.Flags().StringToStringVarP(&labels, "label", "l", nil, "label key value pair: --label key1=value1")

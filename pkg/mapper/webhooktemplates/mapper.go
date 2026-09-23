@@ -16,6 +16,7 @@ func MapCRDToAPI(item executorv1.WebhookTemplate) testkube.WebhookTemplate {
 		Namespace:                item.Namespace,
 		Uri:                      item.Spec.Uri,
 		Events:                   MapEventArrayToCRDEvents(item.Spec.Events),
+		StatusDetailsTypes:       item.Spec.StatusDetailsTypes,
 		Selector:                 item.Spec.Selector,
 		Labels:                   item.Labels,
 		PayloadObjectField:       item.Spec.PayloadObjectField,
@@ -93,6 +94,7 @@ func MapAPIToCRD(request testkube.WebhookTemplateCreateRequest) executorv1.Webho
 		Spec: executorv1.WebhookTemplateSpec{
 			Uri:                      request.Uri,
 			Events:                   MapEventTypesToStringArray(request.Events),
+			StatusDetailsTypes:       request.StatusDetailsTypes,
 			Selector:                 request.Selector,
 			PayloadObjectField:       request.PayloadObjectField,
 			PayloadTemplate:          request.PayloadTemplate,
@@ -197,6 +199,10 @@ func MapUpdateToSpec(request testkube.WebhookTemplateUpdateRequest, webhookTempl
 		webhookTemplate.Spec.Events = MapEventTypesToStringArray(*request.Events)
 	}
 
+	if request.StatusDetailsTypes != nil {
+		webhookTemplate.Spec.StatusDetailsTypes = *request.StatusDetailsTypes
+	}
+
 	if request.Labels != nil {
 		webhookTemplate.Labels = *request.Labels
 	}
@@ -270,6 +276,7 @@ func MapSpecToUpdate(webhookTemplate *executorv1.WebhookTemplate) (request testk
 
 	events := MapEventArrayToCRDEvents(webhookTemplate.Spec.Events)
 	request.Events = &events
+	request.StatusDetailsTypes = &webhookTemplate.Spec.StatusDetailsTypes
 
 	request.Labels = &webhookTemplate.Labels
 	request.Annotations = &webhookTemplate.Annotations

@@ -318,6 +318,11 @@ func (in *WebhookSpec) DeepCopyInto(out *WebhookSpec) {
 		*out = make([]EventType, len(*in))
 		copy(*out, *in)
 	}
+	if in.StatusDetailsTypes != nil {
+		in, out := &in.StatusDetailsTypes, &out.StatusDetailsTypes
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	if in.Headers != nil {
 		in, out := &in.Headers, &out.Headers
 		*out = make(map[string]string, len(*in))
@@ -456,6 +461,11 @@ func (in *WebhookTemplateSpec) DeepCopyInto(out *WebhookTemplateSpec) {
 	if in.Events != nil {
 		in, out := &in.Events, &out.Events
 		*out = make([]EventType, len(*in))
+		copy(*out, *in)
+	}
+	if in.StatusDetailsTypes != nil {
+		in, out := &in.StatusDetailsTypes, &out.StatusDetailsTypes
+		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
 	if in.Headers != nil {

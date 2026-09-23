@@ -43,6 +43,10 @@ func (s *TestkubeAPI) CreateWebhookTemplateHandler() fiber.Handler {
 			webhookTemplate.Namespace = s.Namespace
 		}
 
+		if err := testkube.ValidateStatusDetailsTypes(webhookTemplate.Spec.StatusDetailsTypes); err != nil {
+			return s.Error(c, http.StatusBadRequest, fmt.Errorf("%s: %w", errPrefix, err))
+		}
+
 		created, err := s.WebhookTemplatesClient.Create(&webhookTemplate)
 		if err != nil {
 			return s.Error(c, http.StatusBadGateway, fmt.Errorf("%s: client could not create webhook template: %w", errPrefix, err))
@@ -70,6 +74,12 @@ func (s *TestkubeAPI) UpdateWebhookTemplateHandler() fiber.Handler {
 			err := c.BodyParser(&request)
 			if err != nil {
 				return s.Error(c, http.StatusBadRequest, fmt.Errorf("%s: could not parse json request: %w", errPrefix, err))
+			}
+		}
+
+		if request.StatusDetailsTypes != nil {
+			if err := testkube.ValidateStatusDetailsTypes(*request.StatusDetailsTypes); err != nil {
+				return s.Error(c, http.StatusBadRequest, fmt.Errorf("%s: %w", errPrefix, err))
 			}
 		}
 

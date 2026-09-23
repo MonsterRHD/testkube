@@ -1,5 +1,11 @@
 package testkube
 
+import (
+	"fmt"
+	"slices"
+	"strings"
+)
+
 // StatusDetailsType is the layer that made an execution fail. It is part of the API, so
 // the values are stable. The dashboard reads it for the label and the icon, and a filter
 // and a webhook condition select on it.
@@ -18,6 +24,32 @@ const (
 	// StatusDetailsTypeUnknown is a status that no signal explains.
 	StatusDetailsTypeUnknown StatusDetailsType = "unknown"
 )
+
+// validStatusDetailsTypes lists every layer, in the order of the lifecycle of an execution.
+var validStatusDetailsTypes = []string{
+	string(StatusDetailsTypeInitFailure),
+	string(StatusDetailsTypeExecutionFailure),
+	string(StatusDetailsTypeStepFailure),
+	string(StatusDetailsTypeUserCancel),
+	string(StatusDetailsTypeUnknown),
+}
+
+// StatusDetailsTypes returns every layer, in the order of the lifecycle of an execution.
+// It returns a copy, so a caller cannot change the list that the validation reads.
+func StatusDetailsTypes() []string {
+	return slices.Clone(validStatusDetailsTypes)
+}
+
+// ValidateStatusDetailsTypes returns an error for the first value that is not a layer. A
+// webhook condition with an invalid value never matches, so the webhook stops without a sign.
+func ValidateStatusDetailsTypes(types []string) error {
+	for _, value := range types {
+		if !slices.Contains(validStatusDetailsTypes, value) {
+			return fmt.Errorf("invalid status details type %q, allowed values: %s", value, strings.Join(validStatusDetailsTypes, ", "))
+		}
+	}
+	return nil
+}
 
 // statusDetailsTypes maps each reason code to the layer that it belongs to. A reason that
 // is not in the table gives StatusDetailsTypeUnknown.

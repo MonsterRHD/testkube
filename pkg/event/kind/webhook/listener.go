@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"slices"
 	"text/template"
 	"time"
 
@@ -84,6 +85,7 @@ type WebhookListener struct {
 	disabled           bool
 	config             map[string]executorv1.WebhookConfigValue
 	parameters         []executorv1.WebhookParameterSchema
+	statusDetailsTypes []string
 
 	grpcClient cloud.TestKubeCloudAPIClient
 	apiKey     string
@@ -165,6 +167,14 @@ func ListenerWithEnvID(envID string) WebhookListenerOption {
 	}
 }
 
+// ListenerWithStatusDetailsTypes limits the listener to events whose test workflow execution
+// carries a status details object with a type in the list. An empty list sets no condition.
+func ListenerWithStatusDetailsTypes(types []string) WebhookListenerOption {
+	return func(wl *WebhookListener) {
+		wl.statusDetailsTypes = types
+	}
+}
+
 // ListenerWithGRPCClient sets the gRPC client for Cloud API communication.
 // Used by agent to communicate with control plane for credential resolution.
 func ListenerWithGRPCClient(client cloud.TestKubeCloudAPIClient) WebhookListenerOption {
@@ -206,6 +216,7 @@ func (l *WebhookListener) Metadata() map[string]string {
 		"events":             fmt.Sprintf("%v", l.events),
 		"payloadObjectField": l.payloadObjectField,
 		"disabled":           fmt.Sprint(l.disabled),
+		"statusDetailsTypes": fmt.Sprintf("%v", l.statusDetailsTypes),
 	}
 }
 
@@ -245,9 +256,23 @@ func (l *WebhookListener) Match(event testkube.Event) bool {
 		(event.TestWorkflowExecution.SilentMode != nil && event.TestWorkflowExecution.SilentMode.Webhooks)):
 		l.Log.With(event.Log()...).Debug("webhook listener is disabled for test workflow execution")
 		return false
+	case len(l.statusDetailsTypes) > 0 && !l.matchesStatusDetailsType(event):
+		l.Log.With(event.Log()...).Debug("webhook listener does not match the status details type")
+		return false
 	default:
 		return true
 	}
+}
+
+// matchesStatusDetailsType reports whether the execution of the event carries a status
+// details object with a listed type. An event without the object, for example a start
+// event, never matches, also when the list holds an empty value.
+func (l *WebhookListener) matchesStatusDetailsType(event testkube.Event) bool {
+	execution := event.TestWorkflowExecution
+	if execution == nil || execution.Result == nil || execution.Result.StatusDetails == nil {
+		return false
+	}
+	return slices.Contains(l.statusDetailsTypes, execution.Result.StatusDetails.Type_)
 }
 
 func (l *WebhookListener) Notify(event testkube.Event) (result testkube.EventResult) {

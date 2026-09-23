@@ -159,6 +159,19 @@ spec:
               selector:
                 description: Labels to filter for tests and test suites
                 type: string
+              statusDetailsTypes:
+                description: StatusDetailsTypes limits the webhook to events whose
+                  test workflow execution carries a status details object with a type
+                  in the list. Empty means no condition.
+                items:
+                  enum:
+                  - init-failure
+                  - execution-failure
+                  - step-failure
+                  - user-cancel
+                  - unknown
+                  type: string
+                type: array
               target:
                 description: Target helps decide on which agent the webhook is executed.
                 properties:

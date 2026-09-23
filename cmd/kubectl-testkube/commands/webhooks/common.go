@@ -23,6 +23,16 @@ func NewCreateWebhookOptionsFromFlags(cmd *cobra.Command) (options apiv1.CreateW
 		return options, err
 	}
 
+	statusDetailsTypes, err := cmd.Flags().GetStringArray("status-details-type")
+	if err != nil {
+		return options, err
+	}
+
+	statusDetailsTypes, err = cmdcommon.GetWebhookStatusDetailsTypes(statusDetailsTypes)
+	if err != nil {
+		return options, err
+	}
+
 	payloadObjectField := cmd.Flag("payload-field").Value.String()
 	payloadTemplate := cmd.Flag("payload-template").Value.String()
 	payloadTemplateContent := ""
@@ -87,6 +97,7 @@ func NewCreateWebhookOptionsFromFlags(cmd *cobra.Command) (options apiv1.CreateW
 		Name:                     name,
 		Namespace:                namespace,
 		Events:                   webhooksmapper.MapStringArrayToCRDEvents(events),
+		StatusDetailsTypes:       statusDetailsTypes,
 		Uri:                      uri,
 		Selector:                 selector,
 		Labels:                   labels,
@@ -161,6 +172,20 @@ func NewUpdateWebhookOptionsFromFlags(cmd *cobra.Command) (options apiv1.UpdateW
 		}
 
 		options.Events = &eventTypes
+	}
+
+	if cmd.Flag("status-details-type").Changed {
+		statusDetailsTypes, err := cmd.Flags().GetStringArray("status-details-type")
+		if err != nil {
+			return options, err
+		}
+
+		statusDetailsTypes, err = cmdcommon.GetWebhookStatusDetailsTypes(statusDetailsTypes)
+		if err != nil {
+			return options, err
+		}
+
+		options.StatusDetailsTypes = &statusDetailsTypes
 	}
 
 	if cmd.Flag("label").Changed {

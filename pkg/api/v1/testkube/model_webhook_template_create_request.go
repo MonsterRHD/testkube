@@ -15,6 +15,8 @@ type WebhookTemplateCreateRequest struct {
 	Namespace string      `json:"namespace,omitempty"`
 	Uri       string      `json:"uri,omitempty"`
 	Events    []EventType `json:"events,omitempty"`
+	// Status details types that the webhook fires for. Empty means no condition. When set, the webhook fires only for an event whose test workflow execution carries a statusDetails object with a type in the list. An event without the object, for example a start event, does not fire.
+	StatusDetailsTypes []string `json:"statusDetailsTypes,omitempty"`
 	// Labels to filter for tests and test suites
 	Selector string `json:"selector,omitempty"`
 	// will load the generated payload for notification inside the object

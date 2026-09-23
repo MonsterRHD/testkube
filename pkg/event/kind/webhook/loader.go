@@ -2,6 +2,7 @@ package webhook
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 
 	"go.uber.org/zap"
@@ -200,6 +201,7 @@ func (r WebhooksLoader) Load() (listeners common.Listeners, err error) {
 			ListenerWithDashboardURI(r.dashboardURI),
 			ListenerWithOrgID(r.orgID),
 			ListenerWithEnvID(r.envID),
+			ListenerWithStatusDetailsTypes(webhook.Spec.StatusDetailsTypes),
 		}
 
 		// Add gRPC client and API key if available for credential resolution
@@ -304,25 +306,8 @@ func mergeWebhooks(dst executorv1.Webhook, src executorv1.WebhookTemplate) execu
 		}
 	}
 
-	srcEventTypes := make(map[executorv1.EventType]struct{})
-	for _, eventType := range src.Spec.Events {
-		srcEventTypes[eventType] = struct{}{}
-	}
-
-	dstEventTypes := make(map[executorv1.EventType]struct{})
-	for _, eventType := range dst.Spec.Events {
-		dstEventTypes[eventType] = struct{}{}
-	}
-
-	for evenType := range srcEventTypes {
-		if _, ok := dstEventTypes[evenType]; !ok {
-			dst.Spec.Events = append(dst.Spec.Events, evenType)
-		}
-	}
-
-	sort.Slice(dst.Spec.Events, func(i, j int) bool {
-		return dst.Spec.Events[i] < dst.Spec.Events[j]
-	})
+	dst.Spec.Events = mergeSorted(dst.Spec.Events, src.Spec.Events)
+	dst.Spec.StatusDetailsTypes = mergeSorted(dst.Spec.StatusDetailsTypes, src.Spec.StatusDetailsTypes)
 
 	if src.Spec.Config != nil {
 		if dst.Spec.Config == nil {
@@ -358,5 +343,16 @@ func mergeWebhooks(dst executorv1.Webhook, src executorv1.WebhookTemplate) execu
 		})
 	}
 
+	return dst
+}
+
+// mergeSorted adds the values of src that dst does not have, and sorts the result.
+func mergeSorted[T ~string](dst, src []T) []T {
+	for _, value := range src {
+		if !slices.Contains(dst, value) {
+			dst = append(dst, value)
+		}
+	}
+	slices.Sort(dst)
 	return dst
 }

@@ -93,3 +93,19 @@ func GetWebhookParameters(parameters map[string]string) ([]testkube.WebhookParam
 
 	return parameter, nil
 }
+
+// GetWebhookStatusDetailsTypes drops the empty values and validates the rest. The result is
+// never nil, so that `--status-details-type=` on update sends an empty list and clears the
+// stored list.
+func GetWebhookStatusDetailsTypes(values []string) ([]string, error) {
+	types := make([]string, 0, len(values))
+	for _, value := range values {
+		if value != "" {
+			types = append(types, value)
+		}
+	}
+	if err := testkube.ValidateStatusDetailsTypes(types); err != nil {
+		return nil, err
+	}
+	return types, nil
+}
