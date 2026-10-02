@@ -98,8 +98,12 @@ func (e *executor) Execute(ctx context.Context, req *cloud.ScheduleRequest) ([]t
 		results = append(results, *v)
 	}
 
+	// A stream can deliver some executions and then fail (for example when a
+	// multi-target schedule cannot reach every runner). Return the confirmed
+	// results together with the error so callers can sync what was observed
+	// and retry the unconfirmed part instead of losing it.
 	if resultStream.Error() != nil {
-		return nil, resultStream.Error()
+		return results, resultStream.Error()
 	}
 
 	return results, nil

@@ -51,9 +51,41 @@ type TestWorkflowExecutionStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 	LatestExecution *TestWorkflowExecutionDetails `json:"latestExecution,omitempty"`
+	// observable state of every execution the executor returned for the
+	// request in ExecutionsGeneration, synced one item at a time. A single
+	// request (for example a replicated or multi-target schedule) can produce
+	// several related executions.
+	Executions []TestWorkflowExecutionObservedResult `json:"executions,omitempty"`
+	// spec generation for which the Executions entries were observed. Entries
+	// are replaced when a new generation starts and preserved while a
+	// partially confirmed generation is retried, including after a restart.
+	ExecutionsGeneration int64 `json:"executionsGeneration,omitempty"`
 	// test workflow execution generation
 	Generation int64 `json:"generation,omitempty"`
-	// error message if the execution failed
+	// error message if the execution failed or was only partially confirmed
+	Error string `json:"error,omitempty"`
+}
+
+// TestWorkflowExecutionObservedResult is the observable state the controller
+// recorded for one execution returned while handling a TestWorkflowExecution
+// request. Entries are keyed by Id: results already synced are refreshed in
+// place instead of being recreated.
+type TestWorkflowExecutionObservedResult struct {
+	// unique execution identifier
+	Id string `json:"id"`
+	// execution name
+	Name string `json:"name"`
+	// execution namespace
+	Namespace string `json:"namespace,omitempty"`
+	// sequence number for the execution
+	Number int32 `json:"number,omitempty"`
+	// when the execution has been scheduled to run
+	ScheduledAt metav1.Time `json:"scheduledAt,omitempty"`
+	// when the execution result's status has changed last time (queued, passed, failed)
+	StatusAt metav1.Time `json:"statusAt,omitempty"`
+	// observable status of the execution (queued, running, passed, failed, aborted)
+	Status *TestWorkflowStatus `json:"status,omitempty"`
+	// error message observed on the execution, for example an initialization failure
 	Error string `json:"error,omitempty"`
 }
 

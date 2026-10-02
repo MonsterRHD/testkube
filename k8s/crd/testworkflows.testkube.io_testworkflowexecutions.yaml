@@ -169,8 +169,67 @@ spec:
               description: TestWorkflowExecutionStatus specification
               properties:
                 error:
-                  description: error message if the execution failed
+                  description: error message if the execution failed or was only partially confirmed
                   type: string
+                executions:
+                  description: |-
+                    observable state of every execution the executor returned for the
+                    request in ExecutionsGeneration, synced one item at a time. A single
+                    request (for example a replicated or multi-target schedule) can produce
+                    several related executions.
+                  items:
+                    description: |-
+                      TestWorkflowExecutionObservedResult is the observable state the controller
+                      recorded for one execution returned while handling a TestWorkflowExecution
+                      request. Entries are keyed by Id: results already synced are refreshed in
+                      place instead of being recreated.
+                    properties:
+                      error:
+                        description: error message observed on the execution, for example an initialization failure
+                        type: string
+                      id:
+                        description: unique execution identifier
+                        type: string
+                      name:
+                        description: execution name
+                        type: string
+                      namespace:
+                        description: execution namespace
+                        type: string
+                      number:
+                        description: sequence number for the execution
+                        format: int32
+                        type: integer
+                      scheduledAt:
+                        description: when the execution has been scheduled to run
+                        format: date-time
+                        type: string
+                      status:
+                        description: observable status of the execution (queued, running, passed, failed, aborted)
+                        enum:
+                          - queued
+                          - running
+                          - paused
+                          - passed
+                          - failed
+                          - aborted
+                        type: string
+                      statusAt:
+                        description: when the execution result's status has changed last time (queued, passed, failed)
+                        format: date-time
+                        type: string
+                    required:
+                      - id
+                      - name
+                    type: object
+                  type: array
+                executionsGeneration:
+                  description: |-
+                    spec generation for which the Executions entries were observed. Entries
+                    are replaced when a new generation starts and preserved while a
+                    partially confirmed generation is retried, including after a restart.
+                  format: int64
+                  type: integer
                 generation:
                   description: test workflow execution generation
                   format: int64

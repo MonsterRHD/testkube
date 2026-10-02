@@ -52,7 +52,7 @@ The API server is the main service that:
 
 Controllers watch Kubernetes Custom Resource Definitions (CRDs) and trigger actions:
 
-- **TestWorkflowExecution Controller** (`testworkflowexecutionexecutor.go`) - Watches `TestWorkflowExecution` CRDs and schedules TestWorkflow executions when CRDs are created/updated
+- **TestWorkflowExecution Controller** (`testworkflowexecutionexecutor.go`) - Watches `TestWorkflowExecution` CRDs and schedules TestWorkflow executions when CRDs are created/updated. One request can fan out to several related executions (replicated/multi-target schedules): each returned execution's name, error and status is synced into `status.executions` keyed by execution id. If the scheduler stream fails after confirming only part of the results, the confirmed entries are kept, `status.error` reports the unfinished part and the request is requeued without advancing `status.generation`, so a retry or controller restart resumes from resource status instead of recreating synced results.
 
 Controllers are enabled via `ENABLE_K8S_CONTROLLERS=true` and use [controller-runtime](https://github.com/kubernetes-sigs/controller-runtime).
 

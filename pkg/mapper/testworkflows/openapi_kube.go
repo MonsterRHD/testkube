@@ -1695,6 +1695,27 @@ func MapTestWorkflowExecutionAPIToKube(v *testkube.TestWorkflowExecution) *testw
 	}
 }
 
+// MapTestWorkflowObservedResultAPIToKube projects the observable state of a
+// single execution returned by the scheduler onto the compact status entry
+// synced onto a TestWorkflowExecution resource.
+func MapTestWorkflowObservedResultAPIToKube(v testkube.TestWorkflowExecution) testworkflowsv1.TestWorkflowExecutionObservedResult {
+	result := testworkflowsv1.TestWorkflowExecutionObservedResult{
+		Id:          v.Id,
+		Name:        v.Name,
+		Namespace:   v.Namespace,
+		Number:      v.Number,
+		ScheduledAt: metav1.NewTime(v.ScheduledAt),
+		StatusAt:    metav1.NewTime(v.StatusAt),
+	}
+	if v.Result != nil {
+		result.Status = (*testworkflowsv1.TestWorkflowStatus)(v.Result.Status)
+		if v.Result.Initialization != nil {
+			result.Error = v.Result.Initialization.ErrorMessage
+		}
+	}
+	return result
+}
+
 func MapTestWorkflowExecutionLineageAPIToKube(v testkube.TestWorkflowExecutionLineage) testworkflowsv1.TestWorkflowExecutionLineage {
 	return testworkflowsv1.TestWorkflowExecutionLineage{
 		BaseId:  v.BaseId,

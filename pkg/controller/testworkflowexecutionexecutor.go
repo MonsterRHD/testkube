@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -18,6 +19,10 @@ import (
 	"github.com/kubeshop/testkube/pkg/mapper/testworkflows"
 	"github.com/kubeshop/testkube/pkg/testworkflows/testworkflowexecutor"
 )
+
+// partialScheduleRequeueDelay is how long the controller waits before
+// re-requesting a schedule whose stream only confirmed part of its results.
+const partialScheduleRequeueDelay = 30 * time.Second
 
 type TestWorkflowExecutor interface {
 	Execute(ctx context.Context, request *cloud.ScheduleRequest) ([]testkubev1.TestWorkflowExecution, error)
@@ -88,7 +93,7 @@ func testWorkflowExecutionExecutor(client client.Client, recorder events.EventRe
 		scheduleExecution.Selector = &cloud.ScheduleResourceSelector{Name: twe.Spec.TestWorkflow.Name}
 		scheduleExecution.Config = testworkflows.MapConfigValueKubeToAPI(twe.Spec.ExecutionRequest.Config)
 
-		_, err = exec.Execute(ctx, &cloud.ScheduleRequest{
+		results, err := exec.Execute(ctx, &cloud.ScheduleRequest{
 			Executions:           []*cloud.ScheduleExecution{&scheduleExecution},
 			DisableWebhooks:      twe.Spec.ExecutionRequest.DisableWebhooks,
 			Tags:                 twe.Spec.ExecutionRequest.Tags,
@@ -97,27 +102,57 @@ func testWorkflowExecutionExecutor(client client.Client, recorder events.EventRe
 			User:                 user,
 		})
 
-		if err != nil {
-			execErr := fmt.Errorf("executing test workflow from execution %q: %w", twe.Name, err)
-			// Update the status with the error and set Generation to prevent infinite retries.
-			var statusTWE testworkflowsv1.TestWorkflowExecution
-			if getErr := client.Get(ctx, req.NamespacedName, &statusTWE); getErr != nil {
-				return ctrl.Result{}, fmt.Errorf("getting fresh execution %q for error status update: %w (original error: %w)", twe.Name, getErr, execErr)
+		// Reload the resource before touching status so the update does not
+		// overwrite status written by an event between the Get and now.
+		var statusTWE testworkflowsv1.TestWorkflowExecution
+		if getErr := client.Get(ctx, req.NamespacedName, &statusTWE); getErr != nil {
+			if err != nil {
+				return ctrl.Result{}, fmt.Errorf("getting fresh execution %q for error status update: %w (original error: %w)", twe.Name, getErr, err)
 			}
+			return ctrl.Result{}, fmt.Errorf("getting fresh execution %q for status update: %w", twe.Name, getErr)
+		}
+
+		// Results belong to one request generation. A new generation starts a
+		// fresh batch; entries for the current generation are kept so that a
+		// retry (requeue after partial confirmation or controller restart)
+		// continues the same request from what is already in resource status.
+		if statusTWE.Status.ExecutionsGeneration != twe.Generation {
+			statusTWE.Status.Executions = nil
+			statusTWE.Status.ExecutionsGeneration = twe.Generation
+		}
+		statusTWE.Status.Executions = mergeObservedExecutions(statusTWE.Status.Executions, results)
+
+		if err != nil && len(statusTWE.Status.Executions) == 0 {
+			// Nothing at all was confirmed: record the failure and pin the
+			// generation to stop the request being retried forever.
 			statusTWE.Status.Generation = twe.Generation
 			statusTWE.Status.Error = err.Error()
 			if updateErr := client.Status().Update(ctx, &statusTWE); updateErr != nil {
+				execErr := fmt.Errorf("executing test workflow from execution %q: %w", twe.Name, err)
 				return ctrl.Result{}, fmt.Errorf("updating error status for execution %q: %w (original error: %w)", twe.Name, updateErr, execErr)
 			}
 			recorder.Eventf(&statusTWE, nil, corev1.EventTypeWarning, "ExecutionNotScheduled", "ScheduleExecution", "%s", err.Error())
 			return ctrl.Result{}, nil
 		}
 
-		// Update the status generation to prevent re-execution on operator restart.
-		var statusTWE testworkflowsv1.TestWorkflowExecution
-		if err := client.Get(ctx, req.NamespacedName, &statusTWE); err != nil {
-			return ctrl.Result{}, fmt.Errorf("getting fresh execution %q for status update: %w", twe.Name, err)
+		if err != nil {
+			// Part of the request was confirmed. Keep those results, report
+			// the unfinished part and retry the same generation without
+			// advancing Status.Generation.
+			statusTWE.Status.Error = fmt.Sprintf(
+				"partially scheduled: %d related execution(s) confirmed, executor failed before all results were returned: %s",
+				len(statusTWE.Status.Executions), err.Error(),
+			)
+			if updateErr := client.Status().Update(ctx, &statusTWE); updateErr != nil {
+				return ctrl.Result{}, fmt.Errorf("updating partial status for execution %q: %w", twe.Name, updateErr)
+			}
+			recorder.Eventf(&statusTWE, nil, corev1.EventTypeWarning, "ExecutionPartiallyScheduled", "ScheduleExecution", "%s", statusTWE.Status.Error)
+			return ctrl.Result{RequeueAfter: partialScheduleRequeueDelay}, nil
 		}
+
+		// Every returned result was synced (zero results is a valid outcome):
+		// pin the generation to prevent re-execution on operator restart and
+		// clear any error left by an earlier partial attempt.
 		statusTWE.Status.Generation = twe.Generation
 		statusTWE.Status.Error = ""
 		if err := client.Status().Update(ctx, &statusTWE); err != nil {
@@ -127,8 +162,33 @@ func testWorkflowExecutionExecutor(client client.Client, recorder events.EventRe
 		recorder.Eventf(&statusTWE, nil, corev1.EventTypeNormal, "ExecutionScheduled", "ScheduleExecution", "Scheduled test workflow %q", twe.Spec.TestWorkflow.Name)
 
 		log := ctrl.LoggerFrom(ctx)
-		log.Info("executed test workflow", "name", twe.Spec.TestWorkflow.Name)
+		log.Info("executed test workflow", "name", twe.Spec.TestWorkflow.Name, "executions", len(results))
 
 		return ctrl.Result{}, nil
 	})
+}
+
+// mergeObservedExecutions syncs freshly returned executions into the status
+// entries one item at a time. Entries are keyed by execution id: a result
+// already synced is refreshed in place rather than recreated, and new results
+// (including ones first seen on a retry after a restart) are appended.
+func mergeObservedExecutions(existing []testworkflowsv1.TestWorkflowExecutionObservedResult, results []testkubev1.TestWorkflowExecution) []testworkflowsv1.TestWorkflowExecutionObservedResult {
+	index := make(map[string]int, len(existing))
+	for i, execution := range existing {
+		if execution.Id != "" {
+			index[execution.Id] = i
+		}
+	}
+	for _, result := range results {
+		observed := testworkflows.MapTestWorkflowObservedResultAPIToKube(result)
+		if i, ok := index[observed.Id]; ok && observed.Id != "" {
+			existing[i] = observed
+			continue
+		}
+		if observed.Id != "" {
+			index[observed.Id] = len(existing)
+		}
+		existing = append(existing, observed)
+	}
+	return existing
 }

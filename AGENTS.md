@@ -51,6 +51,14 @@ A synced resource in the Control Plane is exclusively owned by one GitOps agent,
 
 Still to come: Control Plane persistence and enforcement of the owner, and the `testkube.io/gitops-owner` annotation for declaring or transferring ownership from Git. Until those land the agent handles a rejection that nothing yet sends.
 
+## TestWorkflowExecution Kubernetes controller
+
+- `pkg/controller/testworkflowexecutionexecutor.go` (enabled by `ENABLE_K8S_CONTROLLERS`) reconciles a `TestWorkflowExecution` resource into one `ScheduleRequest`. The executor stream can return several related executions for one request (replicated/multi-target schedules), so the controller syncs observable state per result into `status.executions` (`TestWorkflowExecutionObservedResult`: id, name, error, status, timestamps) rather than treating the request as a single result.
+- Entries are keyed by execution id and merged in place. `status.executionsGeneration` records which spec generation the batch belongs to: a new generation resets the entries, while a retry for the same generation keeps them. Do not remove that marker - it is the resume point after a restart (controller-runtime re-fires Create events for every object on relist, and `status.generation` is the guard that prevents re-execution).
+- A schedule error with **no** confirmed result keeps the legacy behavior: `status.generation` is pinned to the current generation and no requeue happens, so a dead scheduler does not retry forever. A schedule error with **some** confirmed results is partial: keep the entries, write the confirmed count plus cause into `status.error`, leave `status.generation` untouched, emit `ExecutionPartiallyScheduled`, and requeue (`partialScheduleRequeueDelay`). Only a fully successful (including empty) response advances `status.generation` and clears the error. Resource deletion (`NotFound`) and empty results keep their existing behavior.
+- `testworkflowexecutor.Execute` returns gathered results together with the stream error instead of `nil, err`; callers that only check `err` are unaffected. The controller's idempotency guarantee is that status entries already synced for a generation are merged by id instead of being duplicated; it cannot un-schedule executions the scheduler created while the stream was broken.
+- Status types live in `api/testworkflows/v1/testworkflowexecution_types.go`; run `make generate-crds` after editing them (deepcopy, `k8s/crd/`, and the Helm CRD templates all regenerate).
+
 ## Regenerating artifacts
 
 - Update the agent OpenAPI files with `make generate-openapi` after schema edits.
