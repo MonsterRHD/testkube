@@ -512,6 +512,7 @@ func TestNormalizeOptions(t *testing.T) {
 		MaxCommitsScan:     0,
 		PullRetries:        0,
 		PullRetryDelay:     0,
+		GitHubMaxPages:     defaultGitHubMaxPages,
 	}, normalizeOptions(Options{
 		ReconcileInterval:  -time.Second,
 		RepoDepth:          -1,
@@ -519,7 +520,11 @@ func TestNormalizeOptions(t *testing.T) {
 		MaxCommitsScan:     -1,
 		PullRetries:        -1,
 		PullRetryDelay:     -time.Second,
+		GitHubMaxPages:     -1,
 	}))
+
+	assert.Equal(t, 5, normalizeOptions(Options{GitHubMaxPages: 5}).GitHubMaxPages,
+		"a positive page cap must be preserved")
 }
 
 func TestResolveNamespaces(t *testing.T) {

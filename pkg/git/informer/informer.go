@@ -71,6 +71,11 @@ type Options struct {
 	WatcherNamespaces   string
 	KubeClient          kubernetes.Interface
 	GitHubTokenProvider GitHubTokenProvider
+
+	// GitHubMaxPages bounds Link-header pagination for pull-request polling
+	// (both the PR list and each PR's changed-file list). When <= 0 the
+	// defaultGitHubMaxPages cap is used.
+	GitHubMaxPages int
 }
 
 func normalizeOptions(opts Options) Options {
@@ -91,6 +96,9 @@ func normalizeOptions(opts Options) Options {
 	}
 	if opts.PullRetryDelay < 0 {
 		opts.PullRetryDelay = 0
+	}
+	if opts.GitHubMaxPages <= 0 {
+		opts.GitHubMaxPages = defaultGitHubMaxPages
 	}
 	return opts
 }

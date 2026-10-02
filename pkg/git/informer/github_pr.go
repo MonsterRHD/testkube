@@ -49,6 +49,18 @@ var githubRepoPattern = regexp.MustCompile(`(?:github\.com|github\.[^/:]+)[/:]([
 // githubHTTPClient is used for GitHub API requests with an appropriate timeout.
 var githubHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
+const (
+	githubPRPageSize      = 100
+	githubPRFilesPageSize = 100
+
+	// defaultGitHubMaxPages bounds how many Link-header pages the informer
+	// walks per endpoint per reconcile. It guards against runaway loops on
+	// malformed/proxied responses and can be raised via the
+	// TEST_TRIGGER_GIT_INFORMER_GITHUB_MAX_PAGES configuration for very large
+	// repositories.
+	defaultGitHubMaxPages = 100
+)
+
 const githubPRNoTokenProviderWarning = "github authType configured for PR polling but no GitHub token provider is available, falling back to configured credentials"
 
 // parseGitHubRepo extracts owner/repo from a GitHub URL (HTTPS or SSH).
@@ -84,16 +96,44 @@ func githubAPIBaseFromURI(uri string) string {
 	return "https://api.github.com"
 }
 
-// fetchGitHubPRs fetches open pull requests from the GitHub REST API.
-// Note: fetches up to 30 most recently updated PRs per call (GitHub default page size).
-// PRs updated beyond this window may be missed if the reconciliation interval is too long.
-func fetchGitHubPRs(ctx context.Context, apiBase, owner, repo, token string, since time.Time) ([]githubPR, error) {
-	endpoint := fmt.Sprintf("%s/repos/%s/%s/pulls?state=all&sort=updated&direction=desc&per_page=30",
-		apiBase, owner, repo)
+// parseGitHubNextLink extracts the rel="next" URL from a GitHub REST API
+// Link response header. The header has the form
+//
+//	<https://api.github.com/...?page=2>; rel="next", <...?page=5>; rel="last"
+//
+// Returns an empty string when no next page is present.
+func parseGitHubNextLink(header string) string {
+	for _, link := range strings.Split(header, ",") {
+		parts := strings.Split(link, ";")
+		if len(parts) < 2 {
+			continue
+		}
+		urlPart := strings.TrimSpace(parts[0])
+		if len(urlPart) < 2 || urlPart[0] != '<' || urlPart[len(urlPart)-1] != '>' {
+			continue
+		}
+		for _, param := range parts[1:] {
+			// Parameter form is rel="next"; compare the key and the
+			// dequoted value so spacing/casing does not break the parse.
+			kv := strings.SplitN(strings.TrimSpace(param), "=", 2)
+			if len(kv) != 2 {
+				continue
+			}
+			if strings.EqualFold(strings.TrimSpace(kv[0]), "rel") &&
+				strings.EqualFold(strings.Trim(strings.TrimSpace(kv[1]), `"`), "next") {
+				return urlPart[1 : len(urlPart)-1]
+			}
+		}
+	}
+	return ""
+}
 
+// githubGet performs a single authenticated GitHub API GET and returns the
+// response body and the rel="next" URL advertised in the Link header.
+func githubGet(ctx context.Context, endpoint, token string) ([]byte, string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	if token != "" {
@@ -102,21 +142,68 @@ func fetchGitHubPRs(ctx context.Context, apiBase, owner, repo, token string, sin
 
 	resp, err := githubHTTPClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(body))
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, "", err
 	}
+	if resp.StatusCode != http.StatusOK {
+		snippet := body
+		if len(snippet) > 1024 {
+			snippet = snippet[:1024]
+		}
+		return nil, "", fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, strings.TrimSpace(string(snippet)))
+	}
+	return body, parseGitHubNextLink(resp.Header.Get("Link")), nil
+}
+
+// normalizeMaxPages applies the default page cap for direct callers that do
+// not supply one.
+func normalizeMaxPages(maxPages int) int {
+	if maxPages <= 0 {
+		return defaultGitHubMaxPages
+	}
+	return maxPages
+}
+
+// fetchGitHubPRs fetches pull requests (all states) from the GitHub REST API,
+// following rel="next" Link headers until every PR page has been traversed or
+// maxPages is reached. Results are sorted by last update, newest first. When
+// since is non-zero, PRs last updated before it are filtered out after
+// pagination completes.
+func fetchGitHubPRs(ctx context.Context, apiBase, owner, repo, token string, since time.Time, maxPages int) ([]githubPR, error) {
+	maxPages = normalizeMaxPages(maxPages)
+	endpoint := fmt.Sprintf("%s/repos/%s/%s/pulls?state=all&sort=updated&direction=desc&per_page=%d",
+		apiBase, owner, repo, githubPRPageSize)
 
 	var prs []githubPR
-	if err := json.NewDecoder(resp.Body).Decode(&prs); err != nil {
-		return nil, err
+	for page := 1; endpoint != ""; page++ {
+		if page > maxPages {
+			log.DefaultLogger.Warnf(
+				"git informer: GitHub PR list pagination limit of %d pages reached for %s/%s; remaining PRs were not scanned this round, raise TEST_TRIGGER_GIT_INFORMER_GITHUB_MAX_PAGES if this is expected",
+				maxPages, owner, repo,
+			)
+			break
+		}
+
+		body, next, err := githubGet(ctx, endpoint, token)
+		if err != nil {
+			return nil, err
+		}
+
+		var pagePRs []githubPR
+		if err := json.Unmarshal(body, &pagePRs); err != nil {
+			return nil, err
+		}
+		prs = append(prs, pagePRs...)
+		endpoint = next
 	}
 
-	// Filter by update time
+	// Filter by update time after all pages are collected so nothing is dropped
+	// just because it did not fit on the first page.
 	if !since.IsZero() {
 		filtered := prs[:0]
 		for _, pr := range prs {
@@ -130,42 +217,39 @@ func fetchGitHubPRs(ctx context.Context, apiBase, owner, repo, token string, sin
 	return prs, nil
 }
 
-// fetchGitHubPRFiles fetches the list of files changed in a pull request.
-// Note: fetches up to 100 files per call (GitHub maximum page size).
-// PRs with more than 100 changed files will have incomplete path matching.
-func fetchGitHubPRFiles(ctx context.Context, apiBase, owner, repo, token string, prNumber int) ([]string, error) {
-	endpoint := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/files?per_page=100",
-		apiBase, owner, repo, prNumber)
+// fetchGitHubPRFiles fetches every file changed in a pull request, following
+// rel="next" Link headers until all pages are traversed or maxPages is
+// reached, so path matching also works for PRs larger than a single page.
+func fetchGitHubPRFiles(ctx context.Context, apiBase, owner, repo, token string, prNumber, maxPages int) ([]string, error) {
+	maxPages = normalizeMaxPages(maxPages)
+	endpoint := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/files?per_page=%d",
+		apiBase, owner, repo, prNumber, githubPRFilesPageSize)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
+	paths := make([]string, 0)
+	for page := 1; endpoint != ""; page++ {
+		if page > maxPages {
+			log.DefaultLogger.Warnf(
+				"git informer: GitHub PR files pagination limit of %d pages reached for %s/%s PR #%d; remaining changed files were not scanned this round, raise TEST_TRIGGER_GIT_INFORMER_GITHUB_MAX_PAGES if this is expected",
+				maxPages, owner, repo, prNumber,
+			)
+			break
+		}
+
+		body, next, err := githubGet(ctx, endpoint, token)
+		if err != nil {
+			return nil, err
+		}
+
+		var files []githubPRFile
+		if err := json.Unmarshal(body, &files); err != nil {
+			return nil, err
+		}
+		for _, f := range files {
+			paths = append(paths, f.Filename)
+		}
+		endpoint = next
 	}
 
-	resp, err := githubHTTPClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, fmt.Errorf("GitHub API returned %d for PR files: %s", resp.StatusCode, string(body))
-	}
-
-	var files []githubPRFile
-	if err := json.NewDecoder(resp.Body).Decode(&files); err != nil {
-		return nil, err
-	}
-
-	paths := make([]string, 0, len(files))
-	for _, f := range files {
-		paths = append(paths, f.Filename)
-	}
 	return paths, nil
 }
 
@@ -180,7 +264,28 @@ func isPullRequestTrigger(trigger testkube.TestTrigger) bool {
 	return false
 }
 
-// checkPullRequests polls GitHub for PRs matching the trigger configuration and fires events.
+// checkPullRequests polls GitHub for PRs matching the trigger configuration and
+// fires events.
+//
+// Baseline semantics:
+//
+//   - The PR list and every PR's changed-file list are traversed in full via
+//     Link-header pagination, so PRs or files beyond the first page cannot be
+//     missed.
+//   - On the first successful pass for a trigger every currently-visible,
+//     branch-matching PR is recorded as the baseline without firing. The init
+//     sentinel is only written after that whole traversal succeeds, so a failed
+//     first pass never makes existing PRs look "opened" later.
+//   - After initialization, an unseen PR is "opened" and a changed SHA/state is
+//     "synchronize"/"closed"/"reopened". Each state change fires exactly once:
+//     its baseline advances only when the event fires. At most one event is
+//     emitted per trigger per round; further matching changes in the same round
+//     keep their old baseline and fire on following rounds, in update order.
+//   - Filter rejections (action type, non-matching paths) advance the baseline
+//     so the same state is not re-evaluated forever. A transient changed-files
+//     fetch error does NOT advance the baseline, so the change is retried.
+//   - Any failure while listing PRs returns before baselines are touched, and
+//     the caller (updateRepositories) restores the last confirmed baseline.
 func (i *Informer) checkPullRequests(ctx context.Context, key string, trigger testkube.TestTrigger, cache *reconcileCache) (matchResult, error) {
 	gitConfig := trigger.ContentSelector.Git
 	if gitConfig == nil {
@@ -199,8 +304,10 @@ func (i *Informer) checkPullRequests(ctx context.Context, key string, trigger te
 		apiBase = i.githubAPIBaseFunc(gitConfig.Uri)
 	}
 
-	// Fetch PRs (up to 30 most recently updated, per GitHub default page size).
-	prs, err := fetchGitHubPRs(ctx, apiBase, owner, repo, token, time.Time{})
+	// Fetch every PR page BEFORE touching any baseline state. An error here
+	// (including a failure on a later page) leaves i.commits untouched so the
+	// caller's snapshot/restore keeps the last confirmed baseline.
+	prs, err := fetchGitHubPRs(ctx, apiBase, owner, repo, token, time.Time{}, i.options.GitHubMaxPages)
 	if err != nil {
 		return matchResult{}, fmt.Errorf("failed to fetch PRs: %w", err)
 	}
@@ -215,6 +322,10 @@ func (i *Informer) checkPullRequests(ctx context.Context, key string, trigger te
 	// that has never been seen before is treated as "opened".
 	initKey := prInitKey(key)
 	prInitialized := i.commits[initKey] != ""
+
+	// eventMeta holds the single event emitted this round; later matching
+	// changes are deferred to the next round instead of being baselined.
+	var eventMeta map[string]string
 
 	for _, pr := range prs {
 		// Apply base branch filters before state tracking. A nil prConfig
@@ -258,7 +369,7 @@ func (i *Informer) checkPullRequests(ctx context.Context, key string, trigger te
 
 		// Apply path filters if configured.
 		if len(paths) > 0 || len(pathsIgnore) > 0 {
-			changedFiles, fileErr := fetchGitHubPRFiles(ctx, apiBase, owner, repo, token, pr.Number)
+			changedFiles, fileErr := fetchGitHubPRFiles(ctx, apiBase, owner, repo, token, pr.Number, i.options.GitHubMaxPages)
 			if fileErr != nil {
 				// Transient error: do NOT advance the baseline so the event can be
 				// retried on the next reconcile.
@@ -272,10 +383,15 @@ func (i *Informer) checkPullRequests(ctx context.Context, key string, trigger te
 			}
 		}
 
-		// All filters passed: advance baseline and fire event.
+		// All filters passed. Only the first matching change in the round fires
+		// and advances; leave later ones on their confirmed baseline so each
+		// state change emits exactly once, on its own subsequent round.
+		if eventMeta != nil {
+			continue
+		}
 		i.commits[prKey] = currentState
 
-		meta := map[string]string{
+		eventMeta = map[string]string{
 			GitMetaKeyCommit:    pr.Head.SHA,
 			GitMetaKeyRef:       "refs/pull/" + strconv.Itoa(pr.Number) + "/head",
 			GitMetaKeyBranch:    pr.Head.Ref,
@@ -288,14 +404,19 @@ func (i *Informer) checkPullRequests(ctx context.Context, key string, trigger te
 			GitMetaKeyPRTitle:   pr.Title,
 			GitMetaKeyPRAuthor:  pr.User.Login,
 		}
-		return matchResult{changed: true, metadata: meta}, nil
 	}
 
-	// Mark the trigger as initialized after completing the first baseline pass.
-	if !prInitialized {
+	// Mark the trigger as initialized only after the full PR list was traversed
+	// and every current PR was recorded. The initial pass never produces an
+	// event, but guard on eventMeta so an interrupted-looking pass cannot both
+	// fire and flip the sentinel.
+	if !prInitialized && eventMeta == nil {
 		i.commits[initKey] = "1"
 	}
 
+	if eventMeta != nil {
+		return matchResult{changed: true, metadata: eventMeta}, nil
+	}
 	return matchResult{}, nil
 }
 

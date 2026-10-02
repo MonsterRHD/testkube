@@ -921,6 +921,7 @@ func main() {
 						MaxCommitsScan:      cfg.TestTriggerGitInformerMaxCommitsScan,
 						PullRetries:         cfg.TestTriggerGitInformerPullRetries,
 						PullRetryDelay:      cfg.TestTriggerGitInformerPullRetryDelay,
+						GitHubMaxPages:      cfg.TestTriggerGitInformerGitHubMaxPages,
 						WatcherNamespaces:   informerWatcherNamespaces,
 						KubeClient:          clientset,
 						GitHubTokenProvider: client,

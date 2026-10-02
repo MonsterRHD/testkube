@@ -281,6 +281,7 @@ type Config struct {
 	TestTriggerGitInformerReconcileInterval  time.Duration `envconfig:"TEST_TRIGGER_GIT_INFORMER_RECONCILE_INTERVAL" default:"1m"`
 	TestTriggerGitInformerPullRetries        int           `envconfig:"TEST_TRIGGER_GIT_INFORMER_PULL_RETRIES" default:"2"`
 	TestTriggerGitInformerPullRetryDelay     time.Duration `envconfig:"TEST_TRIGGER_GIT_INFORMER_PULL_RETRY_DELAY" default:"2s"`
+	TestTriggerGitInformerGitHubMaxPages     int           `envconfig:"TEST_TRIGGER_GIT_INFORMER_GITHUB_MAX_PAGES" default:"100"`
 	ForceSuperAgentMode                      bool          `envconfig:"WARNING_UNSAFE_FORCE_SUPERAGENT_MODE" default:"false"`
 }
 
