@@ -911,6 +911,16 @@ func main() {
 				informerWatcherNamespaces = cfg.TestkubeNamespace
 			}
 
+			// Persist processed commit/PR baselines in a ConfigMap in the agent
+			// namespace so an API server/informer restart does not replay events.
+			// Without a state namespace the informer falls back to memory-only.
+			var gitInformerBaselineStore gitinformer.BaselineStore
+			if strings.TrimSpace(cfg.TestkubeNamespace) != "" {
+				gitInformerBaselineStore = gitinformer.NewConfigMapBaselineStore(
+					clientset, cfg.TestkubeNamespace, gitinformer.DefaultBaselineConfigMapName,
+				)
+			}
+
 			triggerService.RegisterLeaderTask(leader.Task{
 				Name: "git-informer",
 				Start: func(taskCtx context.Context) error {
@@ -924,6 +934,7 @@ func main() {
 						WatcherNamespaces:   informerWatcherNamespaces,
 						KubeClient:          clientset,
 						GitHubTokenProvider: client,
+						BaselineStore:       gitInformerBaselineStore,
 					}).Reconcile(taskCtx)
 					return nil
 				},

@@ -1709,3 +1709,215 @@ func TestCollectHeadMetadata_BranchesOnlyDoesNotSetTag(t *testing.T) {
 	assert.Equal(t, "main", meta[GitMetaKeyBranch])
 	assert.Empty(t, meta[GitMetaKeyTag])
 }
+
+// newPushableMainRemote creates a bare remote with a work clone on main that
+// already contains one initial commit, and returns a helper to commit a file
+// change and push it to the remote.
+func newPushableMainRemote(t *testing.T) (remoteDir string, commitAndPush func(path, content, message string) plumbing.Hash) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	remoteDir = filepath.Join(tmpDir, "remote.git")
+	_, err := git.PlainInit(remoteDir, true)
+	require.NoError(t, err)
+
+	workDir := filepath.Join(tmpDir, "work")
+	workRepo, err := git.PlainInit(workDir, false)
+	require.NoError(t, err)
+	_, err = workRepo.CreateRemote(&config.RemoteConfig{
+		Name: "origin",
+		URLs: []string{remoteDir},
+	})
+	require.NoError(t, err)
+	require.NoError(t, workRepo.Storer.SetReference(
+		plumbing.NewSymbolicReference(plumbing.HEAD, plumbing.NewBranchReferenceName("main")),
+	))
+	worktree, err := workRepo.Worktree()
+	require.NoError(t, err)
+
+	commitAndPush = func(path, content, message string) plumbing.Hash {
+		fullPath := filepath.Join(workDir, path)
+		require.NoError(t, os.MkdirAll(filepath.Dir(fullPath), 0o755))
+		require.NoError(t, os.WriteFile(fullPath, []byte(content), 0o644))
+		_, err := worktree.Add(path)
+		require.NoError(t, err)
+		hash, err := worktree.Commit(message, &git.CommitOptions{
+			Author: &object.Signature{
+				Name:  "test",
+				Email: "test@example.com",
+				When:  time.Now(),
+			},
+		})
+		require.NoError(t, err)
+		require.NoError(t, workRepo.Push(&git.PushOptions{
+			RemoteName: "origin",
+			RefSpecs:   []config.RefSpec{config.RefSpec("refs/heads/main:refs/heads/main")},
+		}))
+		return hash
+	}
+
+	commitAndPush("app.txt", "v1\n", "initial")
+	return remoteDir, commitAndPush
+}
+
+func newPersistedTrigger(uri string) testkube.TestTrigger {
+	resource := testkube.CONTENT_TestTriggerResources
+	return testkube.TestTrigger{
+		Name:      "persisted-trigger",
+		Namespace: "testkube",
+		Event:     string(testtriggersv1.TestTriggerEventGitPush),
+		Resource:  &resource,
+		ContentSelector: &testkube.TestTriggerContentSelector{
+			Git: &testkube.TestTriggerContentGit{
+				Uri:      uri,
+				Branches: []string{"main"},
+			},
+		},
+	}
+}
+
+// TestUpdateRepositories_PersistedCommitBaselineSurvivesRestart verifies that
+// a brand new informer instance (simulating an API server restart) restores
+// processed baselines from the store: unchanged remotes do not replay, while
+// genuinely new commits still fire.
+func TestUpdateRepositories_PersistedCommitBaselineSurvivesRestart(t *testing.T) {
+	remoteDir, commitAndPush := newPushableMainRemote(t)
+	trigger := newPersistedTrigger(remoteDir)
+
+	store := newMemoryBaselineStore()
+	var matched []string
+	newInformer := func() *Informer {
+		inf := NewInformer(
+			stubTestTriggerClient{
+				listFn: func(context.Context, string, testtriggerclient.ListOptions, string) ([]testkube.TestTrigger, error) {
+					return []testkube.TestTrigger{trigger}, nil
+				},
+			},
+			stubMatcher{
+				matchTestTriggerFn: func(_ context.Context, name, namespace string) error {
+					matched = append(matched, namespace+"/"+name)
+					return nil
+				},
+			},
+			"testkube",
+			"",
+			Options{BaselineStore: store},
+		)
+		inf.loadPersistedBaselines(context.Background())
+		return inf
+	}
+
+	// First run initializes the baseline at the current HEAD and persists it.
+	inf1 := newInformer()
+	inf1.updateRepositories(context.Background())
+	assert.Empty(t, matched)
+	require.NotEmpty(t, store.snapshot())
+
+	// Simulate a restart while the remote did not change: the old HEAD must
+	// not be reported as a new commit.
+	inf2 := newInformer()
+	inf2.updateRepositories(context.Background())
+	assert.Empty(t, matched)
+
+	// A genuinely new commit fires exactly once.
+	commitAndPush("app.txt", "v2\n", "second")
+	inf2.updateRepositories(context.Background())
+	assert.Equal(t, []string{"testkube/persisted-trigger"}, matched)
+
+	// Another restart without new pushes does not fire again.
+	inf3 := newInformer()
+	inf3.updateRepositories(context.Background())
+	assert.Equal(t, []string{"testkube/persisted-trigger"}, matched)
+}
+
+// TestUpdateRepositories_PersistFailureRollsBackAndRetries verifies that when
+// persisting the new baselines fails, the in-memory and stored baselines both
+// stay at the previous value, and the event is retried on the next pass once
+// the backend recovers.
+func TestUpdateRepositories_PersistFailureRollsBackAndRetries(t *testing.T) {
+	remoteDir, commitAndPush := newPushableMainRemote(t)
+	trigger := newPersistedTrigger(remoteDir)
+
+	store := newMemoryBaselineStore()
+	var matched []string
+	inf := NewInformer(
+		stubTestTriggerClient{
+			listFn: func(context.Context, string, testtriggerclient.ListOptions, string) ([]testkube.TestTrigger, error) {
+				return []testkube.TestTrigger{trigger}, nil
+			},
+		},
+		stubMatcher{
+			matchTestTriggerFn: func(_ context.Context, name, namespace string) error {
+				matched = append(matched, namespace+"/"+name)
+				return nil
+			},
+		},
+		"testkube",
+		"",
+		Options{BaselineStore: store},
+	)
+	inf.loadPersistedBaselines(context.Background())
+
+	// Establish the persisted initial baseline.
+	inf.updateRepositories(context.Background())
+	require.Empty(t, matched)
+	initialBaseline := store.snapshot()
+	require.NotEmpty(t, initialBaseline)
+
+	commitAndPush("app.txt", "v2\n", "second")
+
+	// Backend unavailable: the event fires this pass, but neither the stored
+	// baseline nor the in-memory baseline may advance.
+	store.setSaveErr(errBaselineUnavailable)
+	inf.updateRepositories(context.Background())
+	assert.Equal(t, []string{"testkube/persisted-trigger"}, matched)
+	assert.Equal(t, initialBaseline, store.snapshot(), "failed Save must not replace the persisted baseline")
+	assert.Equal(t, initialBaseline, inf.snapshotAllBaselines(), "failed Save must roll the in-memory baseline back")
+
+	// Backend recovers: the next pass retries the event and persists the new
+	// baseline.
+	store.setSaveErr(nil)
+	inf.updateRepositories(context.Background())
+	assert.Equal(t, []string{"testkube/persisted-trigger", "testkube/persisted-trigger"}, matched)
+	assert.NotEqual(t, initialBaseline, store.snapshot())
+
+	// No remote changes: nothing fires and no save is attempted.
+	savesBefore := store.saveCount()
+	inf.updateRepositories(context.Background())
+	assert.Equal(t, []string{"testkube/persisted-trigger", "testkube/persisted-trigger"}, matched)
+	assert.Equal(t, savesBefore, store.saveCount())
+}
+
+// TestUpdateRepositories_LoadFailureStartsWithEmptyBaseline verifies that a
+// failed baseline load degrades to the historical behavior: the first pass
+// initializes a fresh baseline without firing and then persists it.
+func TestUpdateRepositories_LoadFailureStartsWithEmptyBaseline(t *testing.T) {
+	remoteDir, _ := newPushableMainRemote(t)
+	trigger := newPersistedTrigger(remoteDir)
+
+	store := newMemoryBaselineStore()
+	store.loadErr = errBaselineUnavailable
+
+	var matched []string
+	inf := NewInformer(
+		stubTestTriggerClient{
+			listFn: func(context.Context, string, testtriggerclient.ListOptions, string) ([]testkube.TestTrigger, error) {
+				return []testkube.TestTrigger{trigger}, nil
+			},
+		},
+		stubMatcher{
+			matchTestTriggerFn: func(_ context.Context, name, namespace string) error {
+				matched = append(matched, namespace+"/"+name)
+				return nil
+			},
+		},
+		"testkube",
+		"",
+		Options{BaselineStore: store},
+	)
+
+	inf.loadPersistedBaselines(context.Background())
+	inf.updateRepositories(context.Background())
+
+	assert.Empty(t, matched, "first pass after a load failure must initialize the baseline without firing")
+	assert.NotEmpty(t, store.snapshot(), "a successful save must establish fresh persisted state despite the load failure")
+}

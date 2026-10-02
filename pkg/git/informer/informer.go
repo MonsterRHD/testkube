@@ -71,6 +71,10 @@ type Options struct {
 	WatcherNamespaces   string
 	KubeClient          kubernetes.Interface
 	GitHubTokenProvider GitHubTokenProvider
+	// BaselineStore persists processed commit/PR baselines across restarts.
+	// When nil, baselines live in memory only and the first poll after a
+	// restart re-initializes them without replaying missed events.
+	BaselineStore BaselineStore
 }
 
 func normalizeOptions(opts Options) Options {
@@ -112,7 +116,7 @@ type Informer struct {
 	mu                sync.Mutex
 	testTriggerClient testtriggerclient.TestTriggerClient
 	matcher           Matcher
-	commits           map[string]string // key -> last seen head hash
+	commits           map[string]string // key -> last seen head hash / PR state
 	revisions         map[string]string // key -> last seen revision selector
 	namespaces        []string
 	environmentID     string
@@ -127,6 +131,16 @@ type Informer struct {
 	// When nil, the production githubAPIBaseFromURI function is used.
 	// Tests can override this to point at a mock HTTP server.
 	githubAPIBaseFunc func(uri string) string
+
+	// baselineStore persists commits between reconciles so an API server or
+	// informer restart does not turn already processed commits/PRs into new
+	// events. nil keeps the historical memory-only behavior.
+	baselineStore BaselineStore
+	// stateLoaded records whether persisted baselines have been loaded once.
+	stateLoaded bool
+	// dirty reports whether commits changed during the current reconcile pass
+	// and therefore need to be persisted at its end.
+	dirty bool
 }
 
 type reconcileCache struct {
@@ -173,6 +187,7 @@ func NewInformer(
 		options:             options,
 		kubeClient:          options.KubeClient,
 		githubTokenProvider: options.GitHubTokenProvider,
+		baselineStore:       options.BaselineStore,
 	}
 }
 
@@ -201,6 +216,7 @@ func resolveNamespaces(watcherNamespaces, _ string) []string {
 func (i *Informer) Reconcile(ctx context.Context) {
 	log.DefaultLogger.Info("git informer: starting reconciler")
 
+	i.loadPersistedBaselines(ctx)
 	i.updateRepositories(ctx)
 
 	ticker := time.NewTicker(i.options.ReconcileInterval)
@@ -215,6 +231,35 @@ func (i *Informer) Reconcile(ctx context.Context) {
 			i.updateRepositories(ctx)
 		}
 	}
+}
+
+// loadPersistedBaselines restores processed commit/PR baselines from the
+// baseline store once, before the first reconcile pass, so a restart does not
+// replay already handled events. A load failure degrades to the memory-only
+// behavior: the first pass initializes fresh baselines without firing.
+func (i *Informer) loadPersistedBaselines(ctx context.Context) {
+	if i.baselineStore == nil {
+		return
+	}
+
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.stateLoaded {
+		return
+	}
+	i.stateLoaded = true
+
+	loaded, err := i.baselineStore.Load(ctx)
+	if err != nil {
+		log.DefaultLogger.Errorf("git informer: failed to load persisted baselines: %v; starting with an empty baseline", err)
+		return
+	}
+	if loaded == nil {
+		loaded = make(map[string]string)
+	}
+	i.commits = loaded
+	i.dirty = false
+	log.DefaultLogger.Infof("git informer: restored %d persisted git baselines", len(loaded))
 }
 
 func (i *Informer) updateRepositories(ctx context.Context) {
@@ -239,6 +284,13 @@ func (i *Informer) updateRepositories(ctx context.Context) {
 	if !testTriggerListSucceeded {
 		return
 	}
+
+	// Keep a snapshot of all baselines taken before this pass. When persisting
+	// the new baselines fails at the end of the pass, the whole snapshot is
+	// restored so the old baseline is not lost and the next pass retries both
+	// the evaluation and the persistence.
+	passStart := i.snapshotAllBaselines()
+	i.dirty = false
 
 	active := make(map[string]struct{}, len(testTriggerMap))
 	cache := newReconcileCache()
@@ -294,10 +346,69 @@ func (i *Informer) updateRepositories(ctx context.Context) {
 					}
 				}
 			}
-			delete(i.commits, k)
+			i.deleteBaseline(k)
 			delete(i.revisions, triggerBase)
 			removeTriggerRepositories(triggerRepositoryPathFromKey(triggerBase))
 		}
+	}
+
+	i.persistBaselines(ctx, passStart)
+}
+
+// setBaseline records a baseline value and marks the pass dirty when the value
+// is new or changed. Callers must hold i.mu.
+func (i *Informer) setBaseline(key, value string) {
+	if current, ok := i.commits[key]; !ok || current != value {
+		i.dirty = true
+	}
+	i.commits[key] = value
+}
+
+// deleteBaseline removes a baseline entry and marks the pass dirty when the
+// key existed. Callers must hold i.mu.
+func (i *Informer) deleteBaseline(key string) {
+	if _, ok := i.commits[key]; ok {
+		i.dirty = true
+	}
+	delete(i.commits, key)
+}
+
+// snapshotAllBaselines returns a copy of every baseline entry.
+func (i *Informer) snapshotAllBaselines() map[string]string {
+	snapshot := make(map[string]string, len(i.commits))
+	for k, v := range i.commits {
+		snapshot[k] = v
+	}
+	return snapshot
+}
+
+func (i *Informer) cloneBaselines() map[string]string {
+	return i.snapshotAllBaselines()
+}
+
+// replaceBaselines swaps the in-memory baselines for a copy of the given map.
+func (i *Informer) replaceBaselines(baselines map[string]string) {
+	replacement := make(map[string]string, len(baselines))
+	for k, v := range baselines {
+		replacement[k] = v
+	}
+	i.commits = replacement
+}
+
+// persistBaselines writes baselines changed during this pass to the store. On
+// failure it restores the pre-pass snapshot: no event evaluated in this pass
+// is acknowledged as processed, so the next pass retries it (at-least-once).
+func (i *Informer) persistBaselines(ctx context.Context, passStart map[string]string) {
+	if i.baselineStore == nil || !i.dirty {
+		return
+	}
+	if err := ctx.Err(); err != nil {
+		return
+	}
+
+	if err := i.baselineStore.Save(ctx, i.cloneBaselines()); err != nil {
+		log.DefaultLogger.Errorf("git informer: failed to persist processed git state: %v; keeping the previous baseline and retrying on the next reconcile", err)
+		i.replaceBaselines(passStart)
 	}
 }
 
@@ -319,10 +430,10 @@ func removeTriggerRepositories(basePath string) {
 
 func (i *Informer) restoreCommitBaseline(key, previousHash string, hadPreviousHash bool) {
 	if hadPreviousHash {
-		i.commits[key] = previousHash
+		i.setBaseline(key, previousHash)
 		return
 	}
-	delete(i.commits, key)
+	i.deleteBaseline(key)
 }
 
 // snapshotRefCommits captures all per-ref commit entries for a trigger key.
@@ -343,12 +454,12 @@ func (i *Informer) restoreRefCommits(triggerKey string, snapshot map[string]stri
 	// Remove all current keys for this trigger
 	for k := range i.commits {
 		if k == triggerKey || strings.HasPrefix(k, prefix) {
-			delete(i.commits, k)
+			i.deleteBaseline(k)
 		}
 	}
 	// Restore snapshot
 	for k, v := range snapshot {
-		i.commits[k] = v
+		i.setBaseline(k, v)
 	}
 }
 
@@ -427,7 +538,7 @@ func (i *Informer) hasNewMatchingCommitWithCache(ctx context.Context, key string
 	// Migrate legacy plain-key entry once before iterating refs.
 	legacyHash, hasLegacy := i.commits[key]
 	if hasLegacy {
-		delete(i.commits, key)
+		i.deleteBaseline(key)
 	}
 
 	// Check each matching ref independently. Fire if ANY ref has a new commit
@@ -440,7 +551,7 @@ func (i *Informer) hasNewMatchingCommitWithCache(ctx context.Context, key string
 			hasPrev = true
 			hasLegacy = false
 		}
-		i.commits[refKey] = pair.Hash
+		i.setBaseline(refKey, pair.Hash)
 		if !hasPrev {
 			log.DefaultLogger.Warnf(
 				"git informer: initializing baseline at current HEAD for trigger %s/%s ref %s; commits pushed while informer was not running are not replayed",
@@ -501,7 +612,7 @@ func (i *Informer) hasNewHeadCommitWithCache(ctx context.Context, key string, tr
 	// Migrate legacy plain-key entry once before iterating refs.
 	legacyHash, hasLegacy := i.commits[key]
 	if hasLegacy {
-		delete(i.commits, key)
+		i.deleteBaseline(key)
 	}
 
 	// Check each matching ref independently. Fire if ANY ref has a new commit.
@@ -514,7 +625,7 @@ func (i *Informer) hasNewHeadCommitWithCache(ctx context.Context, key string, tr
 			hasPrev = true
 			hasLegacy = false
 		}
-		i.commits[refKey] = pair.Hash
+		i.setBaseline(refKey, pair.Hash)
 		if !hasPrev {
 			log.DefaultLogger.Warnf(
 				"git informer: initializing baseline at current HEAD for trigger %s/%s ref %s; commits pushed while informer was not running are not replayed",

@@ -230,7 +230,7 @@ func (i *Informer) checkPullRequests(ctx context.Context, key string, trigger te
 		if !hasPrev {
 			if !prInitialized {
 				// Initial baseline pass: record the current state without firing.
-				i.commits[prKey] = currentState
+				i.setBaseline(prKey, currentState)
 				log.DefaultLogger.Infof("git informer: initializing PR baseline for trigger %s/%s PR #%d",
 					trigger.Namespace, trigger.Name, pr.Number)
 				continue
@@ -252,7 +252,7 @@ func (i *Informer) checkPullRequests(ctx context.Context, key string, trigger te
 		// on the next reconcile regardless of whether the action matches. A nil
 		// prConfig preserves the pre-refactor "match all" semantic.
 		if prConfig != nil && !matchers.PRMatchesTypes(action, prConfig.Types) {
-			i.commits[prKey] = currentState
+			i.setBaseline(prKey, currentState)
 			continue
 		}
 
@@ -267,13 +267,13 @@ func (i *Informer) checkPullRequests(ctx context.Context, key string, trigger te
 			}
 			if !matchers.PRPathsMatch(changedFiles, paths, pathsIgnore) {
 				// Paths do not match; advance baseline to skip this state on the next pass.
-				i.commits[prKey] = currentState
+				i.setBaseline(prKey, currentState)
 				continue
 			}
 		}
 
 		// All filters passed: advance baseline and fire event.
-		i.commits[prKey] = currentState
+		i.setBaseline(prKey, currentState)
 
 		meta := map[string]string{
 			GitMetaKeyCommit:    pr.Head.SHA,
@@ -293,7 +293,7 @@ func (i *Informer) checkPullRequests(ctx context.Context, key string, trigger te
 
 	// Mark the trigger as initialized after completing the first baseline pass.
 	if !prInitialized {
-		i.commits[initKey] = "1"
+		i.setBaseline(initKey, "1")
 	}
 
 	return matchResult{}, nil

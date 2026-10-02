@@ -19,6 +19,7 @@ import (
 	"github.com/kubeshop/testkube/pkg/api/v1/testkube"
 	"github.com/kubeshop/testkube/pkg/git/matchers"
 	"github.com/kubeshop/testkube/pkg/log"
+	"github.com/kubeshop/testkube/pkg/newclients/testtriggerclient"
 
 	testtriggersv1 "github.com/kubeshop/testkube/api/testtriggers/v1"
 )
@@ -348,6 +349,113 @@ func TestResolvePRToken_GitHubProviderFailuresFallBack(t *testing.T) {
 		assert.Equal(t, "fallback-token", token)
 		assert.Equal(t, 1, provider.calls)
 	})
+}
+
+// metaCapturingMatcher records the PR number and action of every fired event.
+type metaCapturingMatcher struct {
+	events []string
+}
+
+func (m *metaCapturingMatcher) MatchGitTrigger(_ context.Context, _, _ string, gitMeta map[string]string) error {
+	m.events = append(m.events, gitMeta[GitMetaKeyPRNumber]+":"+gitMeta[GitMetaKeyPRAction])
+	return nil
+}
+
+// TestUpdateRepositories_PersistedPRBaselineSurvivesRestart verifies that PR
+// baselines (per-PR SHA:state and the init sentinel) restored from the store
+// do not replay already seen PRs after a restart, while synchronized and newly
+// opened PRs still fire.
+func TestUpdateRepositories_PersistedPRBaselineSurvivesRestart(t *testing.T) {
+	openPR := githubPR{
+		Number:    1,
+		State:     "open",
+		Title:     "My PR",
+		UpdatedAt: time.Now(),
+		HTMLURL:   "https://github.com/owner/repo/pull/1",
+	}
+	openPR.Head.Ref = "feature/x"
+	openPR.Head.SHA = "sha-a"
+	openPR.Base.Ref = "main"
+	openPR.User.Login = "dev"
+
+	var currentPRs []githubPR
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/repos/owner/repo/pulls" {
+			json.NewEncoder(w).Encode(currentPRs)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	const uri = "https://github.com/owner/repo.git"
+	resource := testkube.CONTENT_TestTriggerResources
+	trigger := testkube.TestTrigger{
+		Name:      "pr-trigger",
+		Namespace: "default",
+		Event:     "git-pull-request",
+		Resource:  &resource,
+		ContentSelector: &testkube.TestTriggerContentSelector{
+			Git: &testkube.TestTriggerContentGit{Uri: uri},
+		},
+	}
+	key := triggerKey(testTriggerSource, trigger.Namespace, trigger.Name)
+
+	store := newMemoryBaselineStore()
+	matcher := &metaCapturingMatcher{}
+	newInformer := func() *Informer {
+		inf := NewInformer(
+			stubTestTriggerClient{
+				listFn: func(context.Context, string, testtriggerclient.ListOptions, string) ([]testkube.TestTrigger, error) {
+					return []testkube.TestTrigger{trigger}, nil
+				},
+			},
+			matcher,
+			"testkube",
+			"",
+			Options{WatcherNamespaces: "default", BaselineStore: store},
+		)
+		inf.githubAPIBaseFunc = func(string) string { return server.URL }
+		inf.loadPersistedBaselines(context.Background())
+		return inf
+	}
+
+	// First run records the initial PR baseline plus the init sentinel.
+	currentPRs = []githubPR{openPR}
+	inf1 := newInformer()
+	inf1.updateRepositories(context.Background())
+	assert.Empty(t, matcher.events)
+	stored := store.snapshot()
+	assert.Equal(t, "sha-a:open", stored[prCacheKey(key, 1)])
+	assert.Equal(t, "1", stored[prInitKey(key)])
+
+	// Restart with no PR changes: the existing open PR must not fire "opened".
+	inf2 := newInformer()
+	inf2.updateRepositories(context.Background())
+	assert.Empty(t, matcher.events)
+
+	// The PR receives a new head commit: it fires "synchronize".
+	updatedPR := openPR
+	updatedPR.Head.SHA = "sha-b"
+	updatedPR.UpdatedAt = time.Now()
+	currentPRs = []githubPR{updatedPR}
+	inf2.updateRepositories(context.Background())
+	assert.Equal(t, []string{"1:synchronize"}, matcher.events)
+
+	// Another restart without changes does not re-fire.
+	inf3 := newInformer()
+	inf3.updateRepositories(context.Background())
+	assert.Equal(t, []string{"1:synchronize"}, matcher.events)
+
+	// A previously unseen PR appears and fires "opened".
+	newPR := openPR
+	newPR.Number = 2
+	newPR.Head.Ref = "feature/y"
+	newPR.Head.SHA = "sha-c"
+	currentPRs = []githubPR{updatedPR, newPR}
+	inf3.updateRepositories(context.Background())
+	assert.Equal(t, []string{"1:synchronize", "2:opened"}, matcher.events)
 }
 
 func TestFetchGitHubPRs_MockServer(t *testing.T) {

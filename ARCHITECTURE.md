@@ -285,6 +285,7 @@ Testkube extends Kubernetes with Custom Resource Definitions to enable declarati
   - **Features**: Watches Pods, Deployments, Services, etc. and triggers executions; supports git-content based triggers reconciled by the git informer
   - **Event forms**: `spec.event` (single) and `spec.events` (list) are mutually exclusive; validation in `api/testtriggers/v1/validation.go` enforces exactly one, and consumers normalize both forms through `EffectiveEvents()` (CRD spec and API model each expose it) — new event consumers must use the normalized list, never read `spec.event` directly
   - **Leader behavior**: Git informer reconciliation is registered as a leader-coordinated task in `cmd/api-server/main.go`, so only the elected leader performs git polling/pulls
+  - **Processed-state persistence**: Per-ref head commit hashes and PR `SHA:state` baselines (plus the PR initialization sentinel) are persisted to the `testkube-git-informer-state` ConfigMap in the agent namespace via `pkg/git/informer/state.go`, so an API server/informer restart does not replay already handled commits or PRs. The whole reconcile pass is saved once at its end; a save failure rolls the in-memory baseline back to the pre-pass snapshot and retries on the next pass (at-least-once). With no `BaselineStore` configured the informer keeps the historical memory-only behavior
 
 #### Deprecated CRDs
 
